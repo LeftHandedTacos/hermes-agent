@@ -32,7 +32,7 @@ from typing import Optional
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
-DEFAULT_BUSY_TIMEOUT_MS = 120_000
+DEFAULT_BUSY_TIMEOUT_MS = 180_000
 
 # Cap on ``<db>.corrupt.<hash>.bak`` quarantines per board: content-addressing
 # dedupes identical bytes, but mutating corruption mints a new fingerprint each

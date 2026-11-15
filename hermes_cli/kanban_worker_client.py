@@ -141,7 +141,90 @@ async def _await_receipt(client, params, board_db, claim):
         await asyncio.sleep(.2)
         receipt = await _receipt(client, claim)
         claim.answered = time.monotonic()
+    
+    # Fix 1: Recover from 'unknown' admission under burst contention.
+    # When the dispatcher spawns many workers in one tick, the owner's owner_admitted marker
+    # write races the submitter-liveness/board-lock; receipts settle 'unknown'. Instead of
+    # failing immediately, re-read the admission and re-submit if the run is still open.
+    if receipt['status'] == 'unknown':
+        receipt = await _recover_unknown_admission(client, params, board_db, claim, receipt)
+    
     return receipt
+
+
+async def _recover_unknown_admission(client, params, board_db, claim, initial_receipt):
+    """Recover from an 'unknown' admission by re-reading and re-submitting if the run is still open.
+    
+    This handles the burst contention case where the owner's owner_admitted marker write races
+    with the submitter-liveness/board-lock. Up to MAX_UNKNOWN_RETRIES bounded retries.
+    """
+    from hermes_cli.kanban_db_connect import connect_closing
+    import sqlite3
+    
+    MAX_UNKNOWN_RETRIES = 3
+    UNKNOWN_RETRY_DELAY_S = 1.0
+    
+    db = str(await asyncio.to_thread(Path(board_db).resolve))
+    
+    for attempt in range(MAX_UNKNOWN_RETRIES):
+        await asyncio.sleep(UNKNOWN_RETRY_DELAY_S)
+        
+        # Re-read the admission to see if it's still open
+        try:
+            with connect_closing(Path(board_db)) as conn:
+                # Check if the run is still active (status='running')
+                row = conn.execute(
+                    "SELECT status, current_run_id FROM tasks WHERE id=?",
+                    (params['task_id'],)
+                ).fetchone()
+                
+                if row is None:
+                    # Task no longer exists, nothing to recover
+                    break
+                    
+                status, current_run_id = row[0], row[1]
+                
+                if status != 'running' or current_run_id != params['run_id']:
+                    # Run is closed or has moved on
+                    break
+                
+                # Run is still open; re-submit the claim
+                try:
+                    accepted = await client.rpc(
+                        'kanban.run',
+                        _timeout=admission_answer_budget(),
+                        **dict(params, db=db)
+                    )
+                    receipt = accepted['receipt']
+                    
+                    # If this re-submission settles to terminal, we recovered
+                    if receipt['status'] == 'terminal':
+                        print(
+                            f'Kanban unknown recovery succeeded on attempt {attempt+1}',
+                            file=sys.stderr
+                        )
+                        claim.answered = time.monotonic()
+                        return receipt
+                except Exception as rec_exc:
+                    # Re-submission failed; continue to next retry
+                    print(
+                        f'Kanban unknown recovery attempt {attempt+1} failed: {rec_exc}',
+                        file=sys.stderr
+                    )
+                    
+        except Exception as probe_exc:
+            # Can't probe admission state; continue to next retry
+            print(
+                f'Kanban unknown recovery probe failed: {probe_exc}',
+                file=sys.stderr
+            )
+    
+    # Exhausted retries; return the original unknown receipt so the caller can fail
+    print(
+        f'Kanban unknown recovery exhausted after {MAX_UNKNOWN_RETRIES} attempts',
+        file=sys.stderr
+    )
+    return initial_receipt
 
 
 def _exit_code(receipt, params, board_db):

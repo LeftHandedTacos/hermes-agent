@@ -2238,6 +2238,7 @@ def _tick_spawn_budget(
     *,
     max_spawn: Optional[int],
     max_in_progress: Optional[int],
+    spawn_per_tick: Optional[int] = None,
     board: Optional[str],
 ) -> tuple[bool, Optional[int]]:
     """``(may_spawn, spawn_budget)`` for this tick; ``budget None`` = uncapped.
@@ -2290,6 +2291,24 @@ def _tick_spawn_budget(
                 "limiting to at most 1 new worker this tick"
             )
             spawn_budget = 1
+    
+    # Fix 2: Throttle burst spawns to prevent admission contention.
+    # When the dispatcher spawns many workers in one tick, the owner's owner_admitted
+    # marker write races the submitter-liveness/board-lock; receipts settle 'unknown'.
+    # Apply a per-tick cap (default: 3) as a multiplicative guard.
+    # Note: spawn_per_tick param already has default from caller, but we resolve config
+    # to get user-set value (falls back to 3).
+    # _resolve_spawn_per_tick gives us the config value (default 3)
+    spawn_per_tick_cfg = _resolve_spawn_per_tick()
+    if spawn_per_tick_cfg is not None and spawn_budget is not None:
+        if spawn_budget > spawn_per_tick_cfg:
+            result.memory_pressure = "elevated"
+            _kb._log.warning(
+                "kanban dispatch: burst throttle limiting to %d workers this tick (spawn_budget=%d, spawn_per_tick=%d)",
+                spawn_per_tick, spawn_budget, spawn_per_tick
+            )
+            spawn_budget = spawn_per_tick
+    
     return True, spawn_budget
 
 
@@ -2347,6 +2366,22 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
         if profile_exists is not None and not profile_exists(name):
             return None
     return name
+
+
+def _resolve_spawn_per_tick() -> Optional[int]:
+    """Read ``kanban.spawn_per_tick`` from config, or None when unset/invalid.
+    
+    This is a burst throttle to prevent owner-admitted marker write races under
+    contention when the dispatcher spawns many workers at once. Default is 3.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("spawn_per_tick")
+        if raw is None or not isinstance(raw, int) or raw < 1:
+            return 3  # default burst throttle
+        return raw
+    except Exception:
+        return 3  # default burst throttle on error
 
 
 # The dispatch lock has been released here. Fire the tick observer strictly OUTSIDE the single-writer
