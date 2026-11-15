@@ -1970,13 +1970,32 @@ _EXC_UNSAFE_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f\x85\u2028\u2029]")
 _LOG_LINE_STAMP = re.compile(r"(?<=\d{4}-\d{2}-\d{2})[T ](?=\d{2}:\d{2}:\d{2})")
 
 
+def _record_message(record: logging.LogRecord) -> str:
+    """``record.getMessage()`` that never raises on a malformed record.
+
+    A record whose args do not match its template (a ``None`` in a ``%d`` slot,
+    a missing argument) makes ``getMessage`` raise ``TypeError``. Logging then
+    prints a ``--- Logging error ---`` traceback per emit and drops the line, so
+    the formatter that exists to redact secrets would instead cost the process
+    the one record that explains a failure. Fall back to the template plus the
+    raw arguments: still redacted by the caller, still greppable, never fatal.
+    """
+    try:
+        return record.getMessage()
+    except Exception:
+        template = str(record.msg)
+        if not record.args:
+            return template
+        return f"{template} (unformattable args={record.args!r})"
+
+
 class RedactingFormatter(logging.Formatter):
     """Redact secrets and prevent message text from forging log records."""
 
     def format(self, record: logging.LogRecord) -> str:
         # Other handlers must receive the original message and exception cache.
         safe_record = copy.copy(record)
-        safe_record.msg = _LOG_UNSAFE_CHARS.sub(" ", redact_sensitive_text(record.getMessage()))
+        safe_record.msg = _LOG_UNSAFE_CHARS.sub(" ", redact_sensitive_text(_record_message(record)))
         safe_record.args = None
         formatted = redact_log_urls(redact_sensitive_text(super().format(safe_record)))
         # aiohttp's access line carries the raw request target, and webhook platforms that cannot
