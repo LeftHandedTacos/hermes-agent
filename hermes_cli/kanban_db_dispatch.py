@@ -2207,7 +2207,6 @@ def _tick_spawn_budget(
     *,
     max_spawn: Optional[int],
     max_in_progress: Optional[int],
-    spawn_per_tick: Optional[int] = None,
     board: Optional[str],
 ) -> tuple[bool, Optional[int]]:
     """``(may_spawn, spawn_budget)`` for this tick; ``budget None`` = uncapped.
@@ -2265,18 +2264,18 @@ def _tick_spawn_budget(
     # When the dispatcher spawns many workers in one tick, the owner's owner_admitted
     # marker write races the submitter-liveness/board-lock; receipts settle 'unknown'.
     # Apply a per-tick cap (default: 3) as a multiplicative guard.
-    # Note: spawn_per_tick param already has default from caller, but we resolve config
-    # to get user-set value (falls back to 3).
-    # _resolve_spawn_per_tick gives us the config value (default 3)
+    # The cap is the resolved config value: a parameter default of None here meant
+    # both that ``%d`` was fed None (a malformed log record) and that the clamp
+    # below wrote None into the budget, i.e. the throttle disabled itself.
     spawn_per_tick_cfg = _resolve_spawn_per_tick()
     if spawn_per_tick_cfg is not None and spawn_budget is not None:
         if spawn_budget > spawn_per_tick_cfg:
             result.memory_pressure = "elevated"
             _kb._log.warning(
                 "kanban dispatch: burst throttle limiting to %d workers this tick (spawn_budget=%d, spawn_per_tick=%d)",
-                spawn_per_tick, spawn_budget, spawn_per_tick
+                spawn_per_tick_cfg, spawn_budget, spawn_per_tick_cfg
             )
-            spawn_budget = spawn_per_tick
+            spawn_budget = spawn_per_tick_cfg
     
     return True, spawn_budget
 
