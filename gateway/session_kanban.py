@@ -209,7 +209,12 @@ def _watch_submitter(db, run_id):
     """The dispatcher's spawned worker is this attempt's handle: killing it (an operator, a
     timeout, an OOM kill) must end the attempt, as it did when the worker ran the agent itself.
     Exiting hard leaves no ``worker_result``, so the dead-worker sweep books this run's crash.
-    The run row is re-read each tick: the dispatcher records the pid only after its spawn returns."""
+    The run row is re-read each tick: the dispatcher records the pid only after its spawn returns.
+    
+    During admission (while the owner's ``owner_admitted`` marker is not yet written), we do not
+    exit on a dead worker: a long board lock wait can outlast the worker, and ending the attempt
+    while admission is in flight leaves it ``unknown`` (the submitter-liveness race). We only exit
+    if admission has settled (the marker exists) or will never settle (the run has closed)."""
     import os
     from hermes_cli.kanban_db_dispatch import _worker_alive
 
@@ -217,11 +222,22 @@ def _watch_submitter(db, run_id):
         with closing(sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
             while not _TURNS_DONE.wait(1.0):
                 try:
-                    row = conn.execute('SELECT worker_pid, worker_started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+                    # query row: (worker_pid, worker_started_at, task_id)
+                    row = conn.execute('SELECT worker_pid, worker_started_at, task_id FROM task_runs WHERE id=?', (run_id,)).fetchone()
+                    # Check if admission has been written; if not, don't exit on dead worker
+                    # because the admission may still be settling (board lock wait in progress)
+                    admission_marker = conn.execute(
+                        "SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted' "
+                        "ORDER BY id DESC LIMIT 1",
+                        (row[2] if row else None, run_id)  # task_id is the third column
+                    ).fetchone() if row else None
+                    if row and row[0] and row[0] != os.getpid() and not _worker_alive(row[0], row[1]):
+                        # Worker is dead; only exit if admission has settled or run is closed
+                        if admission_marker:
+                            os._exit(1)
+                        # Admission not yet written: keep watching, give it time to settle
                 except sqlite3.Error:
                     continue
-                if row and row[0] and row[0] != os.getpid() and not _worker_alive(row[0], row[1]):
-                    os._exit(1)
     threading.Thread(target=watch, name='kanban-submitter-watch', daemon=True).start()
 
 
