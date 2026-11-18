@@ -216,6 +216,52 @@ What gets imported from OpenClaw:
 
 ---
 
+## Building the Docker image
+
+The published image (`nousresearch/hermes-agent`) is built by CI from `main`. This
+fork carries local fixes that have **not yet been accepted upstream** (upstream PR
+review can lag). The standing build process is therefore **fork-first**: bring this
+fork up to date by rebasing onto upstream, then build from the fork so the image
+contains our un-merged changes.
+
+### Refresh the fork (always rebase, never merge)
+
+```bash
+# one-time: upstream = the canonical repo, fork = this repo
+git remote add upstream https://github.com/NousResearch/hermes-agent.git
+
+# bring our local branches up to date by REBASING onto upstream main
+git fetch upstream
+git rebase upstream/main          # from the branch you're rebuilding
+git push --force-with-lease origin # publish the rebased fork
+```
+
+Rebasing (not merging) keeps our un-merged commits as a clean linear series on top
+of upstream, so they re-apply cleanly when upstream eventually accepts them. Never
+`git merge upstream/main` into the fork: it interleaves merge commits into the
+series and makes future re-bases harder.
+
+### Build the image at an exact pin
+
+```bash
+docker buildx build --load \
+  --tag ghcr.io/<org>/hermes-agent:<commit> \
+  --tag ghcr.io/<org>/hermes-agent:<version>-lw \
+  .
+```
+
+- Tag by **commit SHA**, not `:latest` — `:latest` drifts and a running control
+  plane must be reproducible from a named pin. The image carries its authoritative
+  commit in `/opt/hermes/install-stamp.json` (`schemaVersion: 2`).
+- `--load` writes the image into the local docker store for `docker run`/`docker save`;
+  use `--push` only when publishing to a registry.
+- Requires the `docker-buildx` CLI plugin (BuildKit). `DOCKER_BUILDKIT=1 docker build`
+  alone fails with "buildx component is missing" on Docker ≥ 23.
+
+The image runs the hermes runtime only (see `Dockerfile`). The control-plane stack
+(LiteLLM, Postgres, Temporal, CI runners) ships as **separate** compose services, not
+baked into this image.
+
 ## Contributing
 
 We welcome contributions! See the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) for development setup, code style, and PR process.
