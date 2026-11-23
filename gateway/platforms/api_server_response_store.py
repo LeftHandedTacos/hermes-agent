@@ -331,10 +331,16 @@ class ResponseStore:
         self._conn.execute("INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)", (name, response_id))
         self._conn.commit()
 
+    def _checkpoint_wal(self) -> None:
+        """Drain the WAL so a long-lived reader does not block checkpoint and grow the WAL file."""
+        with suppress(Exception):
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     @_locked
     def close(self) -> None:
         """Close the database connection."""
         with suppress(Exception):
+            self._checkpoint_wal()
             self._conn.close()
 
     @_locked

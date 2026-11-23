@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Dict
 
@@ -259,6 +259,13 @@ class RunIdempotencyStore:
             self._conn.execute("DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?", (scope, key))
             self._conn.commit()
 
+    def _checkpoint_wal(self) -> None:
+        """Drain the WAL so a long-lived reader does not block checkpoint and grow the WAL file."""
+        with self._lock:
+            with suppress(Exception):
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     def close(self) -> None:
+        self._checkpoint_wal()
         with self._lock:
             self._conn.close()
